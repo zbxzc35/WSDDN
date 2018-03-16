@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # Copyright 2015 Paul Balanca. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -28,7 +27,9 @@ import os
 import sys
 import random
 
+import numpy as np
 import tensorflow as tf
+import cv2
 
 import xml.etree.ElementTree as ET
 
@@ -111,10 +112,17 @@ def _process_image(directory, name):
                        float(bbox.find('xmax').text) / shape[1]
                        ))
 
-    return image_data, shape, bboxes, labels, difficult, truncated
+
+    # preprocess labels
+    f_labels = [-1 for i in range(20)]
+    for label in labels:
+        # label - 1: ignore background
+        f_labels[label-1] = 1
+
+    return image_data, shape, bboxes, f_labels, difficult, truncated
 
 def  _convert_to_example(image_data, shape, bboxes, labels,
-                        difficult, truncated):
+                        difficult, truncated, ss_data):
     '''
     '''
     xmin = []
@@ -137,12 +145,59 @@ def  _convert_to_example(image_data, shape, bboxes, labels,
             'image/object/bbox/xmax': float_feature(xmax),
             'image/object/bbox/ymin': float_feature(ymin),
             'image/object/bbox/ymax': float_feature(ymax),
-            'image/object/bbox/label': int64_feature(labels),
+            'image/object/bbox/label': float_feature(labels),
             'image/object/bbox/difficult': int64_feature(difficult),
             'image/object/bbox/truncated': int64_feature(truncated),
             'image/format': bytes_feature(image_format),
+            'image/selectivesearch':  float_feature(ss_data.tolist()),
             'image/encoded': bytes_feature(image_data)}))
     return example
+
+def _get_selective_search(directory, name):
+    filename = directory + DIRECTORY_IMAGES + name + '.jpg'
+    org = cv2.imread(filename)
+
+    height, width = org.shape[0], org.shape[1]
+    _height, _width = height, width
+
+    if height > 2*width:
+        _width = height * 0.5
+    if width > 2*height:
+        _height = width *0.5
+
+    im = cv2.resize(org, (int(_width), int(_height)))
+
+    n_bboxes = 200
+    results = np.zeros((n_bboxes*5))
+
+    # initilize cv2 to accelerate
+    cv2.setUseOptimized(True)
+    cv2.setNumThreads(4)
+
+    ss = cv2.ximgproc.segmentation.createSelectiveSearchSegmentation()
+    ss.setBaseImage(im)
+    ss.switchToSelectiveSearchFast()
+
+    rects = np.array(ss.process())
+
+    # Visualization
+    imOut = org.copy()
+    scale_h, scale_w = _height / height, _width / width
+    for i, rect in enumerate(rects):
+        if i < n_bboxes:
+            x, y, w, h = rect
+            xmin, ymin, xmax, ymax = int(x/scale_w), int(y/scale_h), \
+                                    int((x+w)/scale_w), int((y+h)/scale_h)
+
+            results[i*5:i*5+5] = 0, xmin, ymin, xmax, ymax
+
+            cv2.rectangle(imOut, (xmin, ymin), (xmax, ymax), (0, 255, 0), 1, cv2.LINE_AA)
+
+    cv2.imwrite('tmp/vis' + name + '.jpg', imOut)
+
+    return results
+
+
 
 def _add_to_tfrecord(dataset_dir, name, tfrecord_writer):
     """Loads data from image and annotations files and add them to a TFRecord.
@@ -153,7 +208,12 @@ def _add_to_tfrecord(dataset_dir, name, tfrecord_writer):
     """
     image_data, shape, bboxes, labels, difficult, truncated = \
         _process_image(dataset_dir, name)
-    example = _convert_to_example(image_data, shape, bboxes, labels, difficult, truncated)
+
+    # add selective search data
+    ss_data = _get_selective_search(dataset_dir, name)
+
+    example = _convert_to_example(image_data, shape, bboxes, labels,
+                                difficult, truncated, ss_data)
     tfrecord_writer.write(example.SerializeToString())
 
 def _get_output_filename(output_dir, name, idx):
@@ -174,6 +234,7 @@ def run(dataset_dir, output_dir, name='voc_train', shuffling=False):
     if shuffling:
         random.seed(RANDOM_SEED)
         random.shuffle(filenames)
+
 
     # Process dataset files.
     i = 0
