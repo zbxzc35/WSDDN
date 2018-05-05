@@ -25,7 +25,6 @@ Each record contains following fields:
 '''
 import os
 import sys
-import random
 
 import numpy as np
 import tensorflow as tf
@@ -34,6 +33,9 @@ import cv2
 import xml.etree.ElementTree as ET
 
 from dataset_utils import int64_feature, float_feature, bytes_feature
+
+# ROOT FOLDER
+ROOT_FOLDER = '/home/pantianxiang/'
 
 # VOC labels
 VOC_LABELS = {
@@ -67,6 +69,11 @@ DIRECTORY_IMAGES = 'JPEGImages/'
 # TFRecords convertion parameters.
 RANDOM_SEED = 4242
 SAMPLES_PER_FILES = 200
+
+# EdgeBoxes data file
+EDGEBOXES_FILE = '/home/pantianxiang/tmp/EdgeBoxes/EdgeBoxesVOC2007trainval.mat'
+SELECTIVE_SEARCH_FILE = '/home/pantianxiang/tmp/SelectiveSearch/voc_2007_train.mat'
+
 
 def _process_image(directory, name):
     '''
@@ -122,7 +129,7 @@ def _process_image(directory, name):
     return image_data, shape, bboxes, f_labels, difficult, truncated
 
 def  _convert_to_example(image_data, shape, bboxes, labels,
-                        difficult, truncated, ss_data):
+                        difficult, truncated, preprocessed_box, name):
     '''
     '''
     xmin = []
@@ -149,75 +156,74 @@ def  _convert_to_example(image_data, shape, bboxes, labels,
             'image/object/bbox/difficult': int64_feature(difficult),
             'image/object/bbox/truncated': int64_feature(truncated),
             'image/format': bytes_feature(image_format),
-            'image/selectivesearch':  float_feature(ss_data.tolist()),
-            'image/encoded': bytes_feature(image_data)}))
+            'image/preprocessed_box':  int64_feature(preprocessed_box.tolist()),
+            'image/encoded': bytes_feature(image_data),
+            'image/name': bytes_feature(bytes(name, encoding='utf-8'))}))
     return example
 
-def _get_selective_search(directory, name):
+def _process_box(box, name, directory):
     filename = directory + DIRECTORY_IMAGES + name + '.jpg'
     org = cv2.imread(filename)
 
-    height, width = org.shape[0], org.shape[1]
-    _height, _width = height, width
+    rects = np.array(box)
+    n_rects = rects.shape[0]
 
-    if height > 2*width:
-        _width = height * 0.5
-    if width > 2*height:
-        _height = width *0.5
+    r = np.zeros((n_rects*4), dtype=np.uint64)
 
-    im = cv2.resize(org, (int(_width), int(_height)))
+    height, width, _ = org.shape
 
-    n_bboxes = 200
-    results = np.zeros((n_bboxes*5))
-
-    # initilize cv2 to accelerate
-    cv2.setUseOptimized(True)
-    cv2.setNumThreads(4)
-
-    ss = cv2.ximgproc.segmentation.createSelectiveSearchSegmentation()
-    ss.setBaseImage(im)
-    ss.switchToSelectiveSearchFast()
-
-    rects = np.array(ss.process())
-
-    # Visualization
-    imOut = org.copy()
-    scale_h, scale_w = _height / height, _width / width
     for i, rect in enumerate(rects):
-        if i < n_bboxes:
             x, y, w, h = rect
-            xmin, ymin, xmax, ymax = int(x/scale_w), int(y/scale_h), \
-                                    int((x+w)/scale_w), int((y+h)/scale_h)
+            xmin = max(1, x)
+            ymin = max(1, y)
+            xmax = min(width-1, x+w)
+            ymax = min(height-1, y+h)
 
-            results[i*5:i*5+5] = 0, xmin, ymin, xmax, ymax
+            r[i*4:i*4+4] = xmin, ymin, xmax, ymax
 
-            cv2.rectangle(imOut, (xmin, ymin), (xmax, ymax), (0, 255, 0), 1, cv2.LINE_AA)
-
-    cv2.imwrite('tmp/vis' + name + '.jpg', imOut)
-
-    return results
+    return r
 
 
 
-def _add_to_tfrecord(dataset_dir, name, tfrecord_writer):
+def _add_to_tfrecord(dataset_dir, name, tfrecord_writer, preprocessed_box):
     """Loads data from image and annotations files and add them to a TFRecord.
     Args:
       dataset_dir: Dataset directory;
       name: Image name to add to the TFRecord;
       tfrecord_writer: The TFRecord writer to use for writing.
     """
+
     image_data, shape, bboxes, labels, difficult, truncated = \
         _process_image(dataset_dir, name)
 
-    # add selective search data
-    ss_data = _get_selective_search(dataset_dir, name)
+    preprocessed_box = _process_box(preprocessed_box, name, dataset_dir)
 
     example = _convert_to_example(image_data, shape, bboxes, labels,
-                                difficult, truncated, ss_data)
+                                difficult, truncated, preprocessed_box, name)
+
     tfrecord_writer.write(example.SerializeToString())
 
 def _get_output_filename(output_dir, name, idx):
     return '%s/%s_%03d.tfrecord' % (output_dir, name, idx)
+
+def _get_edgeboxes(edgeboxes_file):
+    import scipy.io
+    data = scipy.io.loadmat(edgeboxes_file)
+    boxes = data['boxes'][0]
+    images = data['images'][0]
+
+    images = [ x[0] for x in images]
+    return images, np.array(boxes)
+
+def _get_selectivesearchboxes(selectivesearch_file):
+    import scipy.io
+    data = scipy.io.loadmat(selectivesearch_file)
+    boxes = data['boxes'][0]
+    images = data['images'][0]
+
+    images = [ x[0] for x in images]
+    return images, boxes
+
 
 def run(dataset_dir, output_dir, name='voc_train', shuffling=False):
     """Runs the conversion operation.
@@ -228,13 +234,10 @@ def run(dataset_dir, output_dir, name='voc_train', shuffling=False):
     if not tf.gfile.Exists(dataset_dir):
         tf.gfile.MakeDirs(dataset_dir)
 
-    # Dataset filenames, and shuffling.
-    path = os.path.join(dataset_dir, DIRECTORY_ANNOTATIONS)
-    filenames = sorted(os.listdir(path))
-    if shuffling:
-        random.seed(RANDOM_SEED)
-        random.shuffle(filenames)
 
+    # Preprocessed Boxes, together with filenames
+    #filenames, boxes = _get_edgeboxes(EDGEBOXES_FILE)
+    filenames, boxes = _get_selectivesearchboxes(SELECTIVE_SEARCH_FILE)
 
     # Process dataset files.
     i = 0
@@ -248,9 +251,9 @@ def run(dataset_dir, output_dir, name='voc_train', shuffling=False):
                 sys.stdout.write('\r>> Converting image %d/%d' % (i+1, len(filenames)))
                 sys.stdout.flush()
 
-                filename = filenames[i]
-                img_name = filename[:-4]
-                _add_to_tfrecord(dataset_dir, img_name, tfrecord_writer)
+                img_name = filenames[i]
+                box = boxes[i]
+                _add_to_tfrecord(dataset_dir, img_name, tfrecord_writer, box)
                 i += 1
                 j += 1
             fidx += 1
@@ -264,4 +267,5 @@ if __name__ =='__main__':
     '''
     DATASET_DIR = sys.argv[1]
     OUTPUT_DIR = sys.argv[2]
-    run(DATASET_DIR, OUTPUT_DIR)
+    NAME = sys.argv[3]
+    run(DATASET_DIR, OUTPUT_DIR, NAME)

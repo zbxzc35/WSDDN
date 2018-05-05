@@ -26,13 +26,14 @@ from lib.nms.py_cpu_nms import py_cpu_nms
 slim = tf.contrib.slim
 
 DATA_FORMAT = 'NCHW'
+ROOT_FOLDER = '/home/pantianxiang/'
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 
 def main(_):
 
     batch_size = 32
-    dataset = datasets_factory.get_dataset('pascalvoc_2007', 'train', 'tfrecords')
+    dataset = datasets_factory.get_dataset('pascalvoc_2007', 'train', ROOT_FOLDER+'tfrecords')
 
     with tf.name_scope('pascalvoc_2007_data_provider'):
         provider = slim.dataset_data_provider.DatasetDataProvider(
@@ -87,7 +88,7 @@ def main(_):
             variables_to_restore.append(var)
 
     #checkpoint_path = './checkpoints/vgg_16.ckpt'
-    checkpoint_path = './checkpoints/ex1/model.ckpt-65000'
+    checkpoint_path = ROOT_FOLDER + 'checkpoints/ex1/model.ckpt-65000'
     init_assign_op, init_feed_dict = slim.assign_from_checkpoint(checkpoint_path,
                                           variables_to_restore,
                                           ignore_missing_vars=False)
@@ -130,8 +131,8 @@ def main(_):
                 output_xr = np.squeeze(output_xr)
                 output_image = output_image[:,:,::-1]
 
-                cv2.imwrite('tmp/vis'+str(i)+'.jpg', output_image)
-                imOut = cv2.imread('tmp/vis'+str(i)+'.jpg')
+                cv2.imwrite(ROOT_FOLDER+'tmp/vis'+str(i)+'.jpg', output_image)
+                imOut = cv2.imread(ROOT_FOLDER+'tmp/vis'+str(i)+'.jpg')
                 threshold = 1e-3
                 for c in range(20):
                     scores = output_xr[:,c].reshape((200,1))
@@ -144,7 +145,7 @@ def main(_):
                              cv2.rectangle(imOut, (int(bbox[0]+1), int(bbox[1]+1)), \
                                 (int(bbox[2]-1), int(bbox[3]-1)), (0, 255, 0), 1, cv2.LINE_AA)
 
-                cv2.imwrite('tmp/vis' + str(i) + '.jpg', imOut)
+                cv2.imwrite(ROOT_FOLDER+'tmp/vis' + str(i) + '.jpg', imOut)
 
 
 if __name__ == '__main__':
